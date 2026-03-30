@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 
@@ -164,29 +165,68 @@ async def post_init(application: Application) -> None:
     )
 
 
-def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+async def run_render() -> None:
+    """Запуск на Render.com: webhook + aiohttp-сервер с health-check."""
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("recipe", recipe_now))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("recipe", recipe_now))
+
+    # Инициализируем бота и ставим webhook
+    await application.initialize()
+    await application.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook",
+                                      drop_pending_updates=True)
+    await application.start()
+
+    # Запускаем планировщик
+    await post_init(application)
+
+    # aiohttp-сервер: health-check + webhook
+    async def health(request):
+        return web.Response(text="OK")
+
+    async def webhook_handler(request):
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response(text="OK")
+
+    aiohttp_app = web.Application()
+    aiohttp_app.router.add_get("/", health)
+    aiohttp_app.router.add_post("/webhook", webhook_handler)
+
+    runner = web.AppRunner(aiohttp_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info("Render: сервер запущен на порту %d.", PORT)
+
+    # Держим процесс живым
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
+
+
+def main() -> None:
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("recipe", recipe_now))
 
     if RENDER_EXTERNAL_URL:
-        # ─── Render.com: webhook + health-check ───
         logger.info("Запуск в режиме webhook (Render).")
-        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path="/webhook",
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
+        asyncio.run(run_render())
     else:
-        # ─── Локальный режим: polling ───
         logger.info("Запуск в режиме polling (локально).")
-        app.run_polling(drop_pending_updates=True)
+        application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
