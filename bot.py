@@ -1,14 +1,29 @@
 import asyncio
 import logging
+import random
 
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram import Update
 from telegram.error import Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from config import BOT_TOKEN, SCHEDULE_HOUR, SCHEDULE_MINUTE, TIMEZONE
-from recipes import get_daily_recipes, fetch_meal_by_category, format_recipe_message, create_session, MEAL_TYPES
+from config import (
+    BOT_TOKEN,
+    PORT,
+    RENDER_EXTERNAL_URL,
+    SCHEDULE_HOUR,
+    SCHEDULE_MINUTE,
+    TIMEZONE,
+)
+from recipes import (
+    MEAL_TYPES,
+    create_session,
+    fetch_meal_by_category,
+    format_recipe_message,
+    get_daily_recipes,
+)
 from subscribers import add_subscriber, load_subscribers, remove_subscriber
 
 logging.basicConfig(
@@ -18,8 +33,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ─── Команды бота ───
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Подписка на ежедневную рассылку рецептов."""
     chat_id = update.effective_chat.id
     if add_subscriber(chat_id):
         await update.message.reply_text(
@@ -41,7 +58,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отписка от рассылки."""
     chat_id = update.effective_chat.id
     if remove_subscriber(chat_id):
         await update.message.reply_text(
@@ -53,7 +69,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Справка по командам бота."""
     await update.message.reply_text(
         "🍽 <b>CookingBot</b> — ежедневные рецепты\n\n"
         "Каждый день в 10:00 по Москве я присылаю 3 рецепта:\n"
@@ -68,10 +83,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def recipe_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отправляет один случайный рецепт прямо сейчас."""
     await update.message.reply_text("🔍 Ищу рецепт...")
 
-    import random
     meal_type = random.choice(["breakfast", "lunch", "dinner"])
     categories = MEAL_TYPES[meal_type]["categories"]
 
@@ -79,16 +92,20 @@ async def recipe_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         meal = await fetch_meal_by_category(session, categories)
 
     if meal:
-        text, image_url = format_recipe_message(meal, meal_type)
+        text, image_url = await format_recipe_message(meal, meal_type)
         if image_url:
             await update.message.reply_photo(photo=image_url)
         await update.message.reply_text(text, parse_mode="HTML")
     else:
-        await update.message.reply_text("Не удалось загрузить рецепт. Попробуйте позже. 😔")
+        await update.message.reply_text(
+            "Не удалось загрузить рецепт. Попробуйте позже. 😔"
+        )
+
+
+# ─── Рассылка по расписанию ───
 
 
 async def send_daily_recipes(bot) -> None:
-    """Отправляет рецепты всем подписчикам (вызывается по расписанию)."""
     subscribers = load_subscribers()
     if not subscribers:
         logger.info("Нет подписчиков для рассылки.")
@@ -119,15 +136,16 @@ async def send_daily_recipes(bot) -> None:
 
             await asyncio.sleep(0.05)
 
-    # Удаляем заблокировавших пользователей
     for chat_id in blocked_users:
         remove_subscriber(chat_id)
 
     logger.info("Рассылка завершена. Заблокировали бота: %d.", len(blocked_users))
 
 
+# ─── Запуск ───
+
+
 async def post_init(application: Application) -> None:
-    """Запускает планировщик после старта event loop."""
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(
         send_daily_recipes,
@@ -138,7 +156,6 @@ async def post_init(application: Application) -> None:
         misfire_grace_time=3600,
     )
     scheduler.start()
-
     logger.info(
         "Бот запущен. Рассылка каждый день в %02d:%02d по %s.",
         SCHEDULE_HOUR,
@@ -155,7 +172,21 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("recipe", recipe_now))
 
-    app.run_polling(drop_pending_updates=True)
+    if RENDER_EXTERNAL_URL:
+        # ─── Render.com: webhook + health-check ───
+        logger.info("Запуск в режиме webhook (Render).")
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="/webhook",
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # ─── Локальный режим: polling ───
+        logger.info("Запуск в режиме polling (локально).")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

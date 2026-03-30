@@ -11,6 +11,10 @@ if not BOT_TOKEN:
 
 BASE_DIR = Path(__file__).parent
 
+# Render.com: автоматически устанавливает PORT и RENDER_EXTERNAL_URL
+PORT = int(os.getenv("PORT", "10000"))
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+
 TIMEZONE = "Europe/Moscow"
 SCHEDULE_HOUR = 10
 SCHEDULE_MINUTE = 0

@@ -6,6 +6,7 @@ import ssl
 
 import aiohttp
 import certifi
+from deep_translator import GoogleTranslator
 
 from config import (
     BREAKFAST_CATEGORIES,
@@ -36,6 +37,19 @@ MEAL_TYPES = {
 }
 
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+_translator = GoogleTranslator(source="en", target="ru")
+
+
+async def translate(text: str) -> str:
+    """Переводит текст с английского на русский."""
+    if not text or not text.strip():
+        return text
+    try:
+        return await asyncio.to_thread(_translator.translate, text)
+    except Exception as e:
+        logger.warning("Ошибка перевода: %s", e)
+        return text
 
 
 def create_session() -> aiohttp.ClientSession:
@@ -101,8 +115,8 @@ def parse_ingredients(meal: dict) -> list[str]:
     return ingredients
 
 
-def format_recipe_message(meal: dict, meal_type: str) -> tuple[str, str | None]:
-    """Форматирует рецепт в HTML-сообщение для Telegram.
+async def format_recipe_message(meal: dict, meal_type: str) -> tuple[str, str | None]:
+    """Форматирует рецепт в HTML-сообщение для Telegram с переводом на русский.
 
     Возвращает (text, image_url).
     """
@@ -110,15 +124,30 @@ def format_recipe_message(meal: dict, meal_type: str) -> tuple[str, str | None]:
     emoji = info["emoji"]
     title = info["title"]
 
-    name = html.escape(meal.get("strMeal", "Без названия"))
-    instructions = (meal.get("strInstructions") or "Нет инструкций.").replace(
-        "\r\n", "\n"
-    )
-    instructions = html.escape(instructions)
     image_url = meal.get("strMealThumb")
 
-    ingredients = parse_ingredients(meal)
-    ingredients_text = "\n".join(f"  • {html.escape(ing)}" for ing in ingredients)
+    # Переводим название, ингредиенты и инструкции параллельно
+    raw_name = meal.get("strMeal", "Без названия")
+    raw_instructions = (meal.get("strInstructions") or "Нет инструкций.").replace(
+        "\r\n", "\n"
+    )
+    raw_ingredients = parse_ingredients(meal)
+    ingredients_joined = "\n".join(raw_ingredients)
+
+    translated_name, translated_instructions, translated_ingredients = (
+        await asyncio.gather(
+            translate(raw_name),
+            translate(raw_instructions),
+            translate(ingredients_joined),
+        )
+    )
+
+    name = html.escape(translated_name)
+    instructions = html.escape(translated_instructions)
+    ingredients_list = translated_ingredients.split("\n")
+    ingredients_text = "\n".join(
+        f"  • {html.escape(ing.strip())}" for ing in ingredients_list if ing.strip()
+    )
 
     text = (
         f"{emoji} <b>{title}</b>\n\n"
@@ -130,8 +159,7 @@ def format_recipe_message(meal: dict, meal_type: str) -> tuple[str, str | None]:
     # Обрезаем если превышает лимит Telegram
     if len(text) > TELEGRAM_MSG_LIMIT:
         overhead = len(text) - len(instructions)
-        max_instructions = TELEGRAM_MSG_LIMIT - overhead - 4  # для "...\n"
-        # Обрезаем по последнему предложению
+        max_instructions = TELEGRAM_MSG_LIMIT - overhead - 4
         truncated = instructions[:max_instructions]
         last_dot = truncated.rfind(".")
         if last_dot > 0:
@@ -164,7 +192,7 @@ async def get_daily_recipes(
     results = []
     for key, meal in zip(meal_type_keys, meals):
         if meal:
-            text, image_url = format_recipe_message(meal, key)
+            text, image_url = await format_recipe_message(meal, key)
             results.append((text, image_url))
         else:
             info = MEAL_TYPES[key]
