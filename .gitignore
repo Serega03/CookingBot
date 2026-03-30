@@ -1,0 +1,7 @@
+.env
+subscribers.json
+__pycache__/
+*.pyc
+*.log
+.venv/
+venv/
